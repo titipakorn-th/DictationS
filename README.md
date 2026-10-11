@@ -15,13 +15,17 @@ DictationS is a macOS push-to-talk dictation app. Hold **Fn** while you speak. R
 
 ## Install
 
-Install Rust and the Xcode Command Line Tools. Then run:
+Download the [latest DictationS release](https://github.com/titipakorn-th/DictationS/releases/latest) and open its `.dmg` file. Drag `DictationS.app` into the `Applications` shortcut in the disk image.
+
+The current release targets Apple Silicon. This first release is ad hoc signed and not notarized, so macOS may warn before opening it.
+
+To build and install from source, install Rust and the Xcode Command Line Tools, then run:
 
 ```sh
 ./scripts/install-macos.sh
 ```
 
-The script builds and packages the app, then copies it to `/Applications/DictationS.app`. Launch it from Applications or run:
+The script builds and copies the app to `/Applications/DictationS.app`. Launch it from Applications or run:
 
 ```sh
 open /Applications/DictationS.app
@@ -58,3 +62,11 @@ To build the app bundle without installing it, run:
 ```
 
 The script writes `target/DictationS.app` and includes the icon from `packaging/AppIcon.png` in the bundle as `DictationS.icns`.
+
+To create a compressed disk image, run:
+
+```sh
+./scripts/package-dmg.sh 0.1.0
+```
+
+The script writes `target/DictationS-<version>.dmg`.
