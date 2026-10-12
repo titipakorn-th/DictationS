@@ -116,6 +116,14 @@ struct IslandView: View {
 
 }
 
+private enum IslandDismissal {
+    /// Statuses that report a finished outcome, so the island fades out on its own.
+    static let settledKinds: Set<String> = ["ready", "complete", "error"]
+    /// How long a settled status stays on screen before the island starts to fade.
+    static let settleDelay: TimeInterval = 1
+    static let fadeDuration: TimeInterval = 0.2
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let model = StatusModel()
@@ -167,19 +175,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         panel.alphaValue = 1
         panel.orderFrontRegardless()
-        guard model.kind == "complete" else { return }
+        guard IslandDismissal.settledKinds.contains(model.kind) else { return }
 
         let workItem = DispatchWorkItem { [weak self] in
             guard let self, self.statusGeneration == generation,
-                  self.model.kind == "complete", let panel = self.panel else { return }
+                  IslandDismissal.settledKinds.contains(self.model.kind), let panel = self.panel else { return }
             NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.2
+                context.duration = IslandDismissal.fadeDuration
                 panel.animator().alphaValue = 0
             } completionHandler: { [weak self] in
                 Task { @MainActor in
                     guard let self else { return }
                     guard self.statusGeneration == generation,
-                          self.model.kind == "complete" else {
+                          IslandDismissal.settledKinds.contains(self.model.kind) else {
                         panel.alphaValue = 1
                         panel.orderFrontRegardless()
                         return
@@ -190,7 +198,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         hideIslandWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + IslandDismissal.settleDelay, execute: workItem)
     }
 
     private func installMenuBarItem() {

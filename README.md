@@ -66,7 +66,7 @@ The script writes `target/DictationS.app` and includes the icon from `packaging/
 To create a compressed disk image, run:
 
 ```sh
-./scripts/package-dmg.sh 0.1.0
+./scripts/package-dmg.sh 0.1.1
 ```
 
 The script writes `target/DictationS-<version>.dmg`.
