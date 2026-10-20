@@ -15,9 +15,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleVersion</key>
-	<string>0.1.1</string>
+	<string>0.1.2</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.1</string>
+	<string>0.1.2</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>DictationS records your speech while you hold Fn so it can transcribe it on this Mac.</string>
 	<key>LSUIElement</key>

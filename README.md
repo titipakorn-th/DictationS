@@ -8,10 +8,11 @@ DictationS is a macOS push-to-talk dictation app. Hold **Fn** while you speak. R
 
 ## Features
 
-- Runs Qwen3-ASR 0.6B or 1.7B with the project's pure-Rust CPU inference crate at [`crates/qwen-asr`](crates/qwen-asr/).
+- Runs Qwen3-ASR 0.6B or NVIDIA Parakeet TDT v3 with the project's pure-Rust CPU inference crate at [`crates/qwen-asr`](crates/qwen-asr/) and the [`parakeet-rs`](https://github.com/altunenes/parakeet-rs) crate.
 - Shows recording, transcription, model loading, and download progress in a status island at the bottom center of the screen.
 - Shows live microphone levels while recording and transcription time after dictation.
 - Lets you switch or remove downloaded models from the menu bar without restarting the app.
+- Shows the app version in the menu bar and checks the GitHub release feed for a newer version.
 
 ## Install
 
@@ -41,7 +42,9 @@ The first time you hold **Fn**, macOS asks for Microphone access. Allow it so Di
 
 ## Choose and manage a model
 
-The default model is Qwen3-ASR 0.6B. DictationS downloads the selected model if its files are missing, at startup or when you select it. The [0.6B](https://huggingface.co/Qwen/Qwen3-ASR-0.6B) and [1.7B](https://huggingface.co/Qwen/Qwen3-ASR-1.7B) checkpoints are hosted by Qwen on Hugging Face.
+The default model is Qwen3-ASR 0.6B. DictationS downloads the selected model if its files are missing, at startup or when you select it. The [Qwen3-ASR 0.6B](https://huggingface.co/Qwen/Qwen3-ASR-0.6B) checkpoint is hosted by Qwen on Hugging Face, and the [Parakeet TDT v3](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx) checkpoint is the ONNX export of NVIDIA's [Parakeet TDT v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3).
+
+Parakeet TDT v3 is multilingual and detects the language on its own, and it punctuates and capitalises its output. It runs on ONNX Runtime on the CPU, and DictationS downloads its int8 export, which is about 640 MB against 1.8 GB for Qwen3-ASR 0.6B.
 
 Open **Speech Model** in the menu bar. Each model has a submenu with **Use this model** and **Remove downloaded model** actions. Your selection is saved for later launches. The menu indicates whether each model is downloaded. The status island shows download progress.
 
@@ -55,6 +58,8 @@ DictationS captures audio while you hold **Fn**. It keeps samples in memory, wri
 
 ## Build
 
+The app version lives in `Cargo.toml`. The packaging scripts copy it into the app bundle and into the disk image name, and the menu bar shows it next to **Check for Updates…**.
+
 To build the app bundle without installing it, run:
 
 ```sh
@@ -66,7 +71,13 @@ The script writes `target/DictationS.app` and includes the icon from `packaging/
 To create a compressed disk image, run:
 
 ```sh
-./scripts/package-dmg.sh 0.1.1
+./scripts/package-dmg.sh
 ```
 
-The script writes `target/DictationS-<version>.dmg`.
+The script writes `target/DictationS-<version>.dmg`, using the version from `Cargo.toml` unless you pass one. Publish it as a GitHub release tagged `v<version>` so **Check for Updates…** finds it.
+
+To transcribe a WAV file with a downloaded model, run:
+
+```sh
+cargo run --release --example transcribe -- parakeet-tdt-v3 recording.wav
+```

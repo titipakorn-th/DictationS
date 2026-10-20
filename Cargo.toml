@@ -1,6 +1,6 @@
 [package]
 name = "dictations"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2024"
 
 [workspace]
@@ -19,4 +19,5 @@ qwen-asr = { path = "crates/qwen-asr" }
 keytap = { path = "crates/keytap", default-features = false }
 tempfile = "3.23.0"
 serde_json = "1.0"
+parakeet-rs = "0.4"
 

@@ -19,13 +19,10 @@ use cpal::{
 };
 use enigo::{Enigo, Keyboard, Settings};
 use keytap::{Event, EventKind, Key, Tap};
-use qwen_asr::{context::QwenCtx, transcribe};
-mod model_store;
-
-fn load_cpu_model(directory: &std::path::Path) -> Result<QwenCtx, Box<dyn Error>> {
-    QwenCtx::load(directory.to_string_lossy().as_ref())
-        .ok_or_else(|| format!("Could not load CPU model from {}", directory.display()).into())
-}
+use dictations::{
+    engine::{self, Engine},
+    model_store::{self, ModelSpec},
+};
 
 struct Recording {
     stream: Stream,
@@ -41,15 +38,15 @@ struct State {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let custom_model_dir = env::var_os("DICTATIONS_MODEL_DIR").map(PathBuf::from);
-    let size = selected_model_size();
-    let model = if let Some(size) = size.as_deref() {
+    let selected = selected_model();
+    let model = if let Some(spec) = selected {
         show_status("loading", "Loading local speech model…");
-        match load_selected_model(size, custom_model_dir.as_deref(), false) {
+        match load_selected_model(spec, custom_model_dir.as_deref(), false) {
             Ok(model) => Some(model),
             Err(error) => {
                 show_status(
                     "error",
-                    &format!("Could not load {size} CPU model: {error}"),
+                    &format!("Could not load {} model: {error}", spec.name),
                 );
                 return Err(error);
             }
@@ -61,12 +58,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
         None
     };
-    if let Some(size) = &size {
+    if let Some(spec) = selected {
         show_status(
             "ready",
-            &format!("{size} CPU model ready. Hold Fn to dictate"),
+            &format!("{} model ready. Hold Fn to dictate", spec.name),
         );
-        println!("Model: {size} CPU");
+        println!("Model: {} (CPU)", spec.name);
     }
     println!("Ready. Hold Fn to record; release Fn to transcribe and type.");
 
@@ -96,7 +93,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Arc::clone(&switching),
         Arc::clone(&dictation_active),
         custom_model_dir,
-        size,
+        selected.map(|spec| spec.id.to_owned()),
     );
     for event in tap.iter() {
         handle_event(event, &state, &model, &switching, &dictation_active);
@@ -105,35 +102,31 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn load_selected_model(
-    size: &str,
+    spec: &ModelSpec,
     custom_model_dir: Option<&std::path::Path>,
     cancel_if_selection_changes: bool,
-) -> Result<QwenCtx, Box<dyn Error>> {
+) -> Result<Engine, Box<dyn Error>> {
     let models_dir = default_models_dir();
     let model_dir = custom_model_dir
         .map(PathBuf::from)
-        .unwrap_or_else(|| model_store::model_directory(&models_dir, size));
-    if custom_model_dir.is_none() && !model_complete(&model_dir) {
-        let repository = match size {
-            "0.6b" => "Qwen/Qwen3-ASR-0.6B",
-            _ => "Qwen/Qwen3-ASR-1.7B",
-        };
-        show_status("downloading", &format!("Downloading {size} model…"));
+        .unwrap_or_else(|| model_store::model_directory(&models_dir, spec));
+    if custom_model_dir.is_none() && !model_store::is_complete(&model_dir, spec) {
+        show_status("downloading", &format!("Downloading {} model…", spec.name));
         model_store::ensure_model(
-            repository,
+            spec,
             &model_dir,
             |fraction| {
                 let _ = send_island_line(&format!("progress\t{fraction:.3}"));
             },
-            || cancel_if_selection_changes && selected_model_size().as_deref() != Some(size),
+            || cancel_if_selection_changes && selected_model_id().as_deref() != Some(spec.id),
         )?;
     }
-    show_status("loading", &format!("Loading {size} CPU model…"));
-    load_cpu_model(&model_dir)
+    show_status("loading", &format!("Loading {} model…", spec.name));
+    engine::load(spec, &model_dir)
 }
 
 fn watch_model_settings(
-    model: Arc<Mutex<Option<QwenCtx>>>,
+    model: Arc<Mutex<Option<Engine>>>,
     switching: Arc<AtomicBool>,
     dictation_active: Arc<AtomicBool>,
     custom_model_dir: Option<PathBuf>,
@@ -144,7 +137,7 @@ fn watch_model_settings(
         let mut failed: Option<String> = None;
         loop {
             thread::sleep(Duration::from_millis(300));
-            let target = selected_model_size();
+            let target = selected_model_id();
             if target == loaded {
                 failed = None;
                 continue;
@@ -157,7 +150,7 @@ fn watch_model_settings(
                 continue;
             }
             switching.store(true, Ordering::Release);
-            let Some(target_size) = target.as_deref() else {
+            let Some(target_id) = target.as_deref() else {
                 *model.lock().expect("ASR model poisoned") = None;
                 loaded = None;
                 failed = None;
@@ -168,33 +161,34 @@ fn watch_model_settings(
                 switching.store(false, Ordering::Release);
                 continue;
             };
-            show_status(
-                "switching",
-                &format!("Switching to {target_size} CPU model…"),
-            );
-            match load_selected_model(target_size, custom_model_dir.as_deref(), true) {
+            let Some(spec) = model_store::model(target_id) else {
+                switching.store(false, Ordering::Release);
+                continue;
+            };
+            show_status("switching", &format!("Switching to {} model…", spec.name));
+            match load_selected_model(spec, custom_model_dir.as_deref(), true) {
                 Ok(next_model) => {
-                    let current = selected_model_size();
-                    if current != target {
+                    let current = selected_model_id();
+                    if current.as_deref() != Some(spec.id) {
                         drop(next_model);
                         switching.store(false, Ordering::Release);
                         continue;
                     }
                     *model.lock().expect("ASR model poisoned") = Some(next_model);
-                    loaded = target.clone();
+                    loaded = Some(spec.id.to_owned());
                     failed = None;
                     show_status(
                         "ready",
-                        &format!("{target_size} CPU model ready. Hold Fn to dictate"),
+                        &format!("{} model ready. Hold Fn to dictate", spec.name),
                     );
                 }
                 Err(error) => {
-                    let current = selected_model_size();
-                    if current == target {
-                        failed = Some(target_size.to_owned());
+                    let current = selected_model_id();
+                    if current.as_deref() == Some(spec.id) {
+                        failed = Some(spec.id.to_owned());
                         show_status(
                             "error",
-                            &format!("Could not switch to {target_size} CPU model: {error}"),
+                            &format!("Could not switch to {} model: {error}", spec.name),
                         );
                         eprintln!("Could not switch speech model: {error}");
                     }
@@ -205,9 +199,18 @@ fn watch_model_settings(
     });
 }
 
-fn selected_model_size() -> Option<String> {
-    let selection = selected_setting("model-size", &["0.6b", "1.7b", "none"], "0.6b");
-    (selection != "none").then_some(selection)
+fn selected_model() -> Option<&'static ModelSpec> {
+    let mut allowed: Vec<&str> = model_store::MODELS.iter().map(|spec| spec.id).collect();
+    allowed.push("none");
+    let selection = selected_setting("model-size", &allowed, "0.6b");
+    if selection == "none" {
+        return None;
+    }
+    model_store::model(&selection)
+}
+
+fn selected_model_id() -> Option<String> {
+    selected_model().map(|spec| spec.id.to_owned())
 }
 
 fn default_models_dir() -> PathBuf {
@@ -286,32 +289,10 @@ fn migrate_directory(
     Ok(())
 }
 
-fn model_complete(directory: &std::path::Path) -> bool {
-    let base_files = ["config.json", "vocab.json", "merges.txt"];
-    if !base_files.iter().all(|name| directory.join(name).is_file()) {
-        return false;
-    }
-    directory.join("model.safetensors").is_file()
-        || (directory.join("model.safetensors.index.json").is_file()
-            && std::fs::read_to_string(directory.join("model.safetensors.index.json")).is_ok_and(
-                |index| {
-                    serde_json::from_str::<serde_json::Value>(&index)
-                        .ok()
-                        .and_then(|value| value.get("weight_map")?.as_object().cloned())
-                        .is_some_and(|weights| {
-                            weights
-                                .values()
-                                .filter_map(|file| file.as_str())
-                                .all(|file| directory.join(file).is_file())
-                        })
-                },
-            ))
-}
-
 fn handle_event(
     event: Event,
     state: &Arc<Mutex<State>>,
-    model: &Arc<Mutex<Option<QwenCtx>>>,
+    model: &Arc<Mutex<Option<Engine>>>,
     switching: &Arc<AtomicBool>,
     dictation_active: &Arc<AtomicBool>,
 ) {
@@ -322,7 +303,7 @@ fn handle_event(
                 return;
             }
             dictation_active.store(true, Ordering::Release);
-            if selected_model_size().is_none()
+            if selected_model().is_none()
                 || model.lock().expect("ASR model poisoned").is_none()
             {
                 dictation_active.store(false, Ordering::Release);
@@ -386,6 +367,7 @@ fn send_island_line(line: &str) -> bool {
             .and_then(|path| path.parent().map(|parent| parent.join("status-island")));
         let stdin = helper.filter(|path| path.is_file()).and_then(|path| {
             Command::new(path)
+                .arg(env!("CARGO_PKG_VERSION"))
                 .stdin(Stdio::piped())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -503,7 +485,7 @@ fn build_stream<T: cpal::SizedSample + Send + 'static>(
 
 fn transcribe_and_type(
     recording: Recording,
-    model: &Arc<Mutex<Option<QwenCtx>>>,
+    model: &Arc<Mutex<Option<Engine>>>,
 ) -> Result<(), Box<dyn Error>> {
     let Recording {
         stream,
@@ -541,9 +523,7 @@ fn transcribe_and_type(
         .as_mut()
         .ok_or("No speech model selected. Choose one from the menu bar.")?;
     let inference_started = Instant::now();
-    model.want_language_detection = true;
-    let text = transcribe::transcribe(model, wav_path.to_string_lossy().as_ref())
-        .ok_or("Qwen3-ASR could not decode this recording")?;
+    let text = model.transcribe(wav_path)?;
     let inference_ms = inference_started.elapsed().as_millis();
     drop(model_guard);
     if !text.trim().is_empty() {

@@ -3,6 +3,9 @@ import Combine
 import Darwin
 import SwiftUI
 
+/// The version of the running app, passed by the launcher.
+private let appVersion = CommandLine.arguments.dropFirst().first ?? "unknown"
+
 @MainActor
 final class StatusModel: ObservableObject {
     @Published var kind = "loading"
@@ -124,6 +127,41 @@ private enum IslandDismissal {
     static let fadeDuration: TimeInterval = 0.2
 }
 
+/// A speech model DictationS can download and run.
+private struct ModelChoice {
+    let id: String
+    let title: String
+    /// Directory under `models/` that holds the downloaded files.
+    let directory: String
+    /// Files the model needs, by exact name.
+    let files: [String]
+    let kind: ModelKind
+}
+
+private enum ModelKind {
+    /// A Qwen checkpoint: one weight file or an index plus shards.
+    case qwen
+    /// A Parakeet checkpoint: ONNX graphs and a vocabulary.
+    case parakeet
+}
+
+private let modelChoices: [ModelChoice] = [
+    ModelChoice(
+        id: "0.6b",
+        title: "Qwen3-ASR 0.6B",
+        directory: "qwen3-asr-0.6b",
+        files: ["config.json", "vocab.json", "merges.txt"],
+        kind: .qwen
+    ),
+    ModelChoice(
+        id: "parakeet-tdt-v3",
+        title: "Parakeet TDT v3",
+        directory: "parakeet-tdt-0.6b-v3",
+        files: ["encoder-model.int8.onnx", "decoder_joint-model.int8.onnx", "vocab.txt"],
+        kind: .parakeet
+    ),
+]
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let model = StatusModel()
@@ -208,7 +246,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         let modelMenu = NSMenu()
         modelMenu.delegate = self
-        for (title, value) in [("Qwen3-ASR 0.6B", "0.6b"), ("Qwen3-ASR 1.7B", "1.7b")] {
+        for choice in modelChoices {
             let actions = NSMenu()
             actions.delegate = self
             for (actionTitle, action) in [
@@ -217,14 +255,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             ] {
                 let item = NSMenuItem(title: actionTitle, action: action, keyEquivalent: "")
                 item.target = self
-                item.representedObject = value
+                item.representedObject = choice.id
                 actions.addItem(item)
             }
-            let choice = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-            choice.representedObject = value
-            choice.submenu = actions
-            modelMenu.addItem(choice)
-            modelActionMenuSizes[ObjectIdentifier(actions)] = value
+            let menuItem = NSMenuItem(title: choice.title, action: nil, keyEquivalent: "")
+            menuItem.representedObject = choice.id
+            menuItem.submenu = actions
+            modelMenu.addItem(menuItem)
+            modelActionMenuSizes[ObjectIdentifier(actions)] = choice.id
         }
         let modelItem = NSMenuItem(title: "Speech Model", action: nil, keyEquivalent: "")
         modelItem.submenu = modelMenu
@@ -232,6 +270,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         speechModelMenu = modelMenu
 
         menu.addItem(.separator())
+        let updateItem = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates(_:)), keyEquivalent: "")
+        updateItem.target = self
+        menu.addItem(updateItem)
+
+        menu.addItem(.separator())
+        let versionItem = NSMenuItem(title: "Version \(appVersion)", action: nil, keyEquivalent: "")
+        versionItem.isEnabled = false
+        menu.addItem(versionItem)
         menu.addItem(NSMenuItem(title: "Quit DictationS", action: #selector(quitDictations), keyEquivalent: "q"))
         menu.items.last?.target = self
         item.menu = menu
@@ -240,10 +286,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         if let value = modelActionMenuSizes[ObjectIdentifier(menu)] {
-            let size = value == "1.7b" ? "1.7B" : "0.6B"
+            let title = modelChoices.first { $0.id == value }?.title ?? value
             for item in menu.items {
                 if item.action == #selector(selectModel(_:)) {
-                    item.title = "Use Qwen3-ASR \(size)"
+                    item.title = "Use \(title)"
                     item.state = selectedModel() == Optional(value) ? .on : .off
                 } else if item.action == #selector(removeModel(_:)) {
                     let exists = modelFilesExist(value)
@@ -265,8 +311,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let value = item.representedObject as? String else { continue }
             let downloaded = modelFilesAvailable(value)
             item.state = selectedModel() == Optional(value) ? .on : .off
-            let size = value == "1.7b" ? "1.7B" : "0.6B"
-            item.title = "Qwen3-ASR \(size) — \(downloaded ? "Downloaded" : "Download on launch")"
+            let title = modelChoices.first { $0.id == value }?.title ?? value
+            item.title = "\(title) — \(downloaded ? "Downloaded" : "Download on launch")"
             item.image = NSImage(
                 systemSymbolName: downloaded ? "checkmark.circle.fill" : "arrow.down.circle",
                 accessibilityDescription: downloaded ? "Model downloaded" : "Model downloads on launch"
@@ -279,28 +325,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             .appendingPathComponent("Library/Application Support/DictationS/model-size")
         let value = (try? String(contentsOf: path, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
         if value == "none" { return nil }
-        return value == "1.7b" ? "1.7b" : "0.6b"
+        return modelChoices.contains { $0.id == value } ? value : "0.6b"
     }
 
-    private func modelFilesAvailable(_ size: String) -> Bool {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let models = home.appendingPathComponent("Library/Application Support/DictationS/models", isDirectory: true)
-        let shared = models.appendingPathComponent("qwen3-asr-\(size)", isDirectory: true)
-        return containsCompleteModel(in: shared)
+    private func modelFilesAvailable(_ id: String) -> Bool {
+        guard let choice = modelChoices.first(where: { $0.id == id }) else { return false }
+        return containsCompleteModel(in: modelDirectory(choice), choice: choice)
     }
 
-    private func modelFilesExist(_ size: String) -> Bool {
-        guard ["0.6b", "1.7b"].contains(size) else { return false }
-        let models = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/DictationS/models", isDirectory: true)
-        let directory = models.appendingPathComponent("qwen3-asr-\(size)", isDirectory: true)
-        guard let files = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return false }
+    private func modelFilesExist(_ id: String) -> Bool {
+        guard let choice = modelChoices.first(where: { $0.id == id }) else { return false }
+        guard let files = try? FileManager.default.contentsOfDirectory(atPath: modelDirectory(choice).path)
+        else { return false }
         return !files.isEmpty
     }
 
-    private func containsCompleteModel(in directory: URL) -> Bool {
+    private func modelDirectory(_ choice: ModelChoice) -> URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/DictationS/models", isDirectory: true)
+            .appendingPathComponent(choice.directory, isDirectory: true)
+    }
+
+    private func containsCompleteModel(in directory: URL, choice: ModelChoice) -> Bool {
         let files = Set((try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? [])
-        guard ["config.json", "vocab.json", "merges.txt"].allSatisfy(files.contains) else { return false }
+        guard choice.files.allSatisfy(files.contains) else { return false }
+        guard choice.kind == .qwen else { return true }
         if files.contains("model.safetensors") { return true }
         guard files.contains("model.safetensors.index.json"),
               let data = try? Data(contentsOf: directory.appendingPathComponent("model.safetensors.index.json")),
@@ -313,6 +362,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func selectModel(_ sender: NSMenuItem) {
         guard let value = sender.representedObject as? String else { return }
+        let title = modelChoices.first { $0.id == value }?.title ?? value
         let alreadySelected = selectedModel() == value
         let directory = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/DictationS", isDirectory: true)
@@ -320,7 +370,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try (value + "\n").write(to: directory.appendingPathComponent("model-size"), atomically: true, encoding: .utf8)
             if alreadySelected {
-                receiveStatus("ready\tQwen3-ASR \(value == "1.7b" ? "1.7B" : "0.6B") is already selected.")
+                receiveStatus("ready\t\(title) is already selected.")
                 return
             }
             statusItem?.menu?.items.first(where: { $0.title == "Speech Model" })?.submenu?.items.forEach {
@@ -334,13 +384,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func removeModel(_ sender: NSMenuItem) {
         guard let value = sender.representedObject as? String,
-              ["0.6b", "1.7b"].contains(value), modelFilesExist(value) else { return }
+              let choice = modelChoices.first(where: { $0.id == value }),
+              modelFilesExist(value) else { return }
         let selected = selectedModel()
         let removesActiveModel = selected == Optional(value) && ProcessInfo.processInfo.environment["DICTATIONS_MODEL_DIR"] == nil
-        let displaySize = value == "1.7b" ? "1.7B" : "0.6B"
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Remove Qwen3-ASR \(displaySize)?"
+        alert.messageText = "Remove \(choice.title)?"
         alert.informativeText = removesActiveModel
             ? "DictationS will unload this model and stay open without a model. Choose a speech model later to download it again."
             : "This removes the downloaded model files from this Mac."
@@ -351,15 +401,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let support = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/DictationS", isDirectory: true)
         let models = support.appendingPathComponent("models", isDirectory: true)
-        let destination = models.appendingPathComponent("qwen3-asr-\(value)", isDirectory: true)
+        let destination = models.appendingPathComponent(choice.directory, isDirectory: true)
         do {
+            // Resolve both sides before comparing. The support directory on disk
+            // can be spelled differently than the path here — the filesystem is
+            // case-insensitive, and only the resolved form compares equal.
             let expectedModels = FileManager.default.homeDirectoryForCurrentUser
-                .resolvingSymlinksInPath()
                 .appendingPathComponent("Library/Application Support/DictationS/models", isDirectory: true)
+                .resolvingSymlinksInPath()
                 .standardizedFileURL
             guard models.resolvingSymlinksInPath().standardizedFileURL == expectedModels,
                   destination.resolvingSymlinksInPath().standardizedFileURL == expectedModels
-                    .appendingPathComponent("qwen3-asr-\(value)", isDirectory: true)
+                    .appendingPathComponent(choice.directory, isDirectory: true)
+                    .resolvingSymlinksInPath()
                     .standardizedFileURL else {
                 throw CocoaError(.fileWriteNoPermission)
             }
@@ -374,7 +428,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             try FileManager.default.removeItem(at: destination)
             receiveStatus(removesActiveModel
                 ? "ready\tModel removed. Choose a speech model to download it again."
-                : "ready\tQwen3-ASR \(displaySize) model removed.")
+                : "ready\t\(choice.title) model removed.")
         } catch {
             if removesActiveModel, let selected {
                 try? (selected + "\n").write(
@@ -385,6 +439,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             receiveStatus("error\tCould not remove model: \(error.localizedDescription)")
         }
+    }
+
+    @objc private func checkForUpdates(_ sender: Any?) {
+        latestRelease { result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let release):
+                    if isNewerVersion(release.version, than: appVersion) {
+                        self.presentUpdateAvailable(release)
+                    } else {
+                        self.presentUpToDate(release)
+                    }
+                case .failure:
+                    self.presentUpdateFailed()
+                }
+            }
+        }
+    }
+
+    private func presentUpdateAvailable(_ release: UpdateRelease) {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "DictationS \(release.version) is available"
+        alert.informativeText = "You are running \(appVersion)."
+        alert.addButton(withTitle: "Open Release Page")
+        alert.addButton(withTitle: "Later")
+        if alert.runModal() == .alertFirstButtonReturn {
+            NSWorkspace.shared.open(release.page)
+        }
+    }
+
+    private func presentUpToDate(_ release: UpdateRelease) {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "DictationS \(appVersion) is up to date"
+        alert.informativeText = "The latest release is \(release.version)."
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    private func presentUpdateFailed() {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Could not check for updates"
+        alert.informativeText = "GitHub did not return a release. Check your connection and try again."
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     @objc private func quitDictations() {

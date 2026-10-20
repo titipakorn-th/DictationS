@@ -3,8 +3,9 @@ set -eu
 
 cargo build --release
 
+version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 app="target/DictationS.app"
-rm -rf target/Dictations.app
+rm -rf "$app"
 mkdir -p "$app/Contents/MacOS"
 iconset="$app/Contents/Resources/DictationS.iconset"
 mkdir -p "$iconset"
@@ -16,7 +17,9 @@ done
 iconutil -c icns "$iconset" -o "$app/Contents/Resources/DictationS.icns"
 rm -rf "$iconset"
 cp target/release/dictations "$app/Contents/MacOS/dictations"
-swiftc -parse-as-library -O -framework AppKit -framework Combine -framework SwiftUI scripts/status-island.swift -o "$app/Contents/MacOS/status-island"
+swiftc -parse-as-library -O -framework AppKit -framework Combine -framework SwiftUI scripts/status-island.swift scripts/update-check.swift -o "$app/Contents/MacOS/status-island"
 cp packaging/Info.plist "$app/Contents/Info.plist"
+plutil -replace CFBundleShortVersionString -string "$version" "$app/Contents/Info.plist"
+plutil -replace CFBundleVersion -string "$version" "$app/Contents/Info.plist"
 codesign --force --deep --sign - "$app"
 printf 'Packaged %s\n' "$app"

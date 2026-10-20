@@ -1,12 +1,13 @@
 #!/bin/sh
 set -eu
 
-version=${1:-0.1.0}
 app="target/DictationS.app"
 stage="target/DictationS-dmg"
-dmg="target/DictationS-${version}.dmg"
 
 ./scripts/package-macos.sh
+# The disk image carries the version the app bundle reports.
+version=${1:-$(plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist")}
+dmg="target/DictationS-${version}.dmg"
 rm -rf "$stage" "$dmg"
 mkdir -p "$stage"
 trap 'rm -rf "$stage"' EXIT
