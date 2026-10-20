@@ -2,3 +2,4 @@
 /models
 /.audit
 .DS_Store
+/.worktrees
